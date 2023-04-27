@@ -115,20 +115,16 @@ tabu_solver = TabuSampler()
 from dwave.samplers import TreeDecompositionSolver 
 tree_solver = TreeDecompositionSolver()
 
+from dwave.system import LeapHybridSampler
+hybrid_solver = LeapHybridSampler(solver={'category':'hybrid'})
 
 
 
 
 
-
-
-
-
-
-
-all_instances = ['G1','G12','G13','G14','G28','G35',
-                       'G41','G50','G55','G56','G60',
-                       'G61','G66','G67','G70','G72','G81']
+all_instances = ['G0']#,'G12','G13','G14','G28','G35',
+                      # 'G41','G50','G55','G56','G60',
+                      # 'G61','G66','G67','G70','G72','G81']
 # file contains edge information
 file_path = os.getcwd()
 #filename = file_path+"/myGenerate_100000_0.07"
@@ -136,32 +132,28 @@ file_path = os.getcwd()
 #filename = file_path+"/G81"
 
 print("start calculations!")
-for instance_name in all_instances:
+#for instance_name in all_instances:
 
-    filename = file_path+"/"+instance_name
+filename = file_path+"/"+instance_name
 
-    # construct instance graph from txt file 
-    # (1) solve qubo model 
-    num_nodes,num_edges,instance_dict = formulate_maxcut_qubo_sparse(filename)
-    running_time = []
-    #bqm = dimod.BQM.from_qubo(instance_dict)
-    start_time = time.time()
-    numreads = 100000
-    #sampleset = sa_solver.sample_qubo(instance_dict,num_reads=20,beta_range=[0.01,10000],beta_schedule_type='geometric',num_sweeps=1000,num_sweeps_per_beta=1)
-    #sampleset = tabu_solver.sample_qubo(instance_dict,num_reads=20,tenure=100,num_restarts=100,coefficient_z_first=10000000,lower_bound_z=5000000)
-    #bqm = dimod.BQM.from_qubo(instance_dict)
-    sampleset = sd_solver.sample_qubo(instance_dict,num_reads=numreads,large_sparse_opt=True)
-    end_time = time.time()
-    df = sampleset.to_pandas_dataframe()
-    lowest_energy = np.min(df.iloc[:,num_nodes].values)
-    average_energy = np.sum(df.iloc[:,num_nodes].values)/numreads
-    print("instance: ",instance_name,"  time {0:<8f}  lowest energy {1:<8} average energy {2:<8}".format((end_time-start_time)/numreads,lowest_energy,average_energy))
+# construct instance graph from txt file 
+# (1) solve qubo model 
+num_nodes,num_edges,instance_dict = formulate_maxcut_qubo_sparse(filename)
+running_time = []
+#bqm = dimod.BQM.from_qubo(instance_dict)
+start_time = time.time()
+numreads = 1
+#sampleset = sa_solver.sample_qubo(instance_dict,num_reads=20,beta_range=[0.01,10000],beta_schedule_type='geometric',num_sweeps=1000,num_sweeps_per_beta=1)
+#sampleset = tabu_solver.sample_qubo(instance_dict,num_reads=20,tenure=100,num_restarts=100,coefficient_z_first=10000000,lower_bound_z=5000000)
+#bqm = dimod.BQM.from_qubo(instance_dict)
+#sampleset = sd_solver.sample_qubo(instance_dict,num_reads=numreads,large_sparse_opt=True)
+bqm = dimod.BQM.from_qubo(instance_dict)
+sampleset = hybrid_solver.sample(bqm)
+end_time = time.time()
+df = sampleset.to_pandas_dataframe()
+lowest_energy = np.min(df.iloc[:,num_nodes].values)
+average_energy = np.sum(df.iloc[:,num_nodes].values)/numreads
+print(sampleset.info)
+print("instance: ",instance_name,"  time {0:<8f}  lowest energy {1:<8} average energy {2:<8}".format((end_time-start_time)/numreads,lowest_energy,average_energy))
 
-    # (2) solve ising model
-    #offset,J = formulate_maxcut_ising_sparse(filename)
-    #start_time = time.time()
-    #sampleset = solver.sample_ising(np.zeros(5),J,num_reads=10,beta_schedule_type='geometric',num_sweeps=1000,beta_range=[0.001,100000000.0],num_sweeps_per_beta=1,)
-    #print(sampleset)
-    #best_solution = df.iloc[0].values[:-2] 
-    #cut_number = get_cut_number(best_solution,J)
-    #print("cut number : ",cut_number*2)
+
