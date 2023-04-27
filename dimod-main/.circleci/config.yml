@@ -1,0 +1,367 @@
+version: 2.1
+
+orbs:
+  codecov: codecov/codecov@3
+  win: circleci/windows@2.2.0
+
+environment: &global-environment
+  PIP_PROGRESS_BAR: 'off'
+
+jobs:
+  build-linux:
+    parameters:
+      python-version:
+        type: string
+
+    docker:
+      - image: cimg/python:3.9
+
+    environment:
+      <<: *global-environment
+      CIBW_PROJECT_REQUIRES_PYTHON: ~=<< parameters.python-version>>
+      CIBW_ARCHS_LINUX: x86_64
+
+    steps:
+      - checkout
+      - setup_remote_docker
+      - restore_cache: &build-linux-restore-cache
+          keys:
+            - pip-{{ .Environment.CIRCLE_JOB }}-{{ checksum "pyproject.toml" }}
+      - run: &build-linux-wheels
+          name: build wheels
+          command: |
+            python3 -m venv env
+            . env/bin/activate
+            pip install pip --upgrade
+            pip install cibuildwheel==2.11.2
+            cibuildwheel --output-dir dist
+      - save_cache: &build-linux-save-cache
+          paths:
+            - ~/.cache/pip
+          key: pip-{{ .Environment.CIRCLE_JOB }}-{{ checksum "pyproject.toml" }}
+      - store_artifacts: &store-artifacts
+          path: ./dist
+      - persist_to_workspace: &persist-to-workspace
+          root: ./dist/
+          paths: .
+
+  build-linux-aarch64:
+    parameters:
+      python-version:
+        type: string
+
+    machine:
+      image: ubuntu-2004:202101-01
+
+    resource_class: arm.medium
+
+    environment:
+      <<: *global-environment
+      CIBW_ARCHS_LINUX: aarch64
+      CIBW_PROJECT_REQUIRES_PYTHON: ~=<< parameters.python-version>>
+
+    steps: &build-steps
+      - checkout
+      - restore_cache: *build-linux-restore-cache
+      - run: *build-linux-wheels
+      - save_cache: *build-linux-save-cache
+      - store_artifacts: *store-artifacts
+      - persist_to_workspace: *persist-to-workspace
+
+  build-osx:
+    parameters:
+      python-version:
+        type: string
+
+    macos:
+      xcode: 13.4.0
+
+    environment:
+      <<: *global-environment
+      CIBW_PROJECT_REQUIRES_PYTHON: ~=<< parameters.python-version>>
+
+    steps: *build-steps
+
+  build-sdist:
+    docker:
+      - image: cimg/python:3.9
+
+    steps:
+      - checkout
+      - run:
+          name: build sdist
+          command: |
+            python -m venv env
+            . env/bin/activate
+            pip install -r requirements.txt
+            python setup.py sdist -d ./dist
+      - store_artifacts: *store-artifacts
+      - persist_to_workspace: *persist-to-workspace
+
+  build-windows:
+    parameters:
+      python-version:
+        type: string
+
+    executor:
+      name: win/default
+
+    environment:
+      <<: *global-environment
+      CIBW_PROJECT_REQUIRES_PYTHON: ~=<< parameters.python-version>>
+      CIBW_ARCHS_WINDOWS: AMD64
+      # use delvewheel on windows
+      CIBW_BEFORE_BUILD_WINDOWS: "pip install delvewheel"
+      CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: "delvewheel repair -w {dest_dir} {wheel}"
+
+    steps:
+      - checkout
+      - run:
+          name: build wheels
+          command: |
+            python -m pip install pip --upgrade
+            python -m pip install cibuildwheel==2.11.2
+            python -m cibuildwheel --output-dir dist
+      - store_artifacts: *store-artifacts
+      - persist_to_workspace: *persist-to-workspace
+
+  deploy-all:
+    docker:
+      - image: cimg/python:3.9
+
+    steps:
+      - attach_workspace:
+          at: dist
+
+      - store_artifacts:
+          path: ./dist
+
+      - run:
+          name: deploy
+          command: |
+            python -m venv env
+            . env/bin/activate
+            python -m pip install twine
+            twine upload -u "$PYPI_USERNAME" -p "$PYPI_PASSWORD" --skip-existing ./dist/*
+
+  test-airspeed-velocity:
+    docker:
+      - image: cimg/python:3.9
+
+    steps:
+      - checkout
+      - run:
+          name: install dependencies
+          command: |
+            python -m venv env
+            . env/bin/activate
+            pip install -r benchmarks/requirements.txt
+      - run:
+          name: check that our airspeed velocity tests run without failure
+          command: |
+            . env/bin/activate
+            asv machine --yes
+            asv run --quick --strict
+
+  # we could do this as part of the various test jobs but getting the pathing
+  # and configuration to work correctly is a pain. And since there is not
+  # significant different between the linux/osx/windows code I think it
+  # suffices to just do it once
+  test-codecov:
+    docker:
+      - image: cimg/python:3.9
+
+    steps:
+      - checkout
+      - run:
+          name: run c++ coverage
+          command: |
+            sudo apt update
+            sudo apt install lcov
+            make -C testscpp/ catch2 coverage
+      - run:
+          name: run python coverage
+          command: |
+            python -m venv env
+            . env/bin/activate
+            pip install -r requirements.txt -r tests/requirements.txt
+            python setup.py build_ext --inplace
+            coverage run -m unittest
+            coverage xml
+      - codecov/upload:
+          file: coverage.xml
+      - codecov/upload:
+          file: testscpp/coverage.info
+
+  test-doctest:
+    docker:
+      - image: cimg/python:3.7 # as of may 2022 RTD uses 3.7
+
+    steps:
+      - checkout
+      - run:
+          name: install doxygen
+          command: sudo apt update && sudo apt install doxygen
+      - run:
+          name: install dependencies
+          command: |
+            python -m venv env
+            . env/bin/activate
+            pip install -r requirements.txt
+            pip install -r docs/requirements.txt
+      - run:
+          name: build dimod
+          command: |
+            . env/bin/activate
+            python setup.py build_ext --inplace
+      - run:
+          name: build docs
+          command: |
+            . env/bin/activate
+            make -C docs/ cpp html
+      - store_artifacts:
+          path: ./docs/build/html
+      - run:
+          name: doctest
+          command: |
+            . env/bin/activate
+            make -C docs/ doctest
+      - run:
+          name: linkcheck
+          command: |
+            . env/bin/activate
+            make -C docs/ linkcheck
+      - run:
+          # If we add more notebooks in the future we can make this more general.
+          # We avoid a (slow) dimod install by playing around with the path.
+          name: test scaling guide
+          command: |
+            . env/bin/activate
+            PYTHONPATH=$(pwd):$PYTHONPATH jupyter nbconvert --to notebook --execute docs/intro/intro_scaling.ipynb
+
+  test-linux:
+    parameters:
+      python-version:
+        type: string
+      dependencies:
+        type: string
+
+    docker:
+      - image: python:<< parameters.python-version >>-slim
+
+    steps:
+      - checkout
+      - attach_workspace:
+          at: dist
+      - run:
+          name: install
+          command: |
+            python -m venv env
+            . env/bin/activate
+            pip install dimod --no-index -f dist/ --force-reinstall --no-deps
+            pip install << parameters.dependencies >> --upgrade --only-binary=numpy
+      - run: &unix-run-tests
+          name: run tests
+          command: |
+            . env/bin/activate
+            cd tests/
+            pip install -r requirements.txt
+            python -m unittest
+
+  test-linux-cpp:
+    docker:
+      - image: cimg/python:3.9
+
+    steps:
+      - checkout
+      - run: &cpp-tests
+          name: run cpp tests
+          command: |
+            make -C testscpp/ --always-make
+
+  test-osx-cpp:
+    macos:
+      xcode: 13.4.0
+
+    steps:
+      - checkout
+      - run: *cpp-tests
+
+  test-sdist:
+    docker:
+      - image: cimg/python:3.9
+
+    steps:
+      - checkout
+      - attach_workspace:
+          at: dist
+      - run:
+          name: install from sdist
+          command: |
+            python -m venv env
+            . env/bin/activate
+            pip install dist/dimod*.tar.gz
+      - run: *unix-run-tests
+
+workflows:
+  tests:
+    jobs:
+      - build-linux: &build
+          matrix:
+            parameters:
+              python-version: &python-versions [3.7.9, 3.8.9, 3.9.4, 3.10.0, 3.11.0]
+      - build-linux-aarch64: *build
+      - build-sdist
+      - build-osx: *build
+      - build-windows: *build
+      - test-airspeed-velocity
+      - test-codecov
+      - test-doctest
+      - test-linux:
+          name: test-linux-<< matrix.dependencies >>-py<< matrix.python-version >>
+          requires:
+            - build-linux
+          matrix:
+            parameters:
+              # test the lowest supported numpy and the latest
+              dependencies: [oldest-supported-numpy, numpy]
+              python-version: *python-versions
+            exclude:
+              # we don't support 1.14.5, the oldest version for Python 3.7.9
+              - python-version: 3.7.9
+                dependencies: oldest-supported-numpy
+      - test-linux-cpp
+      - test-osx-cpp
+      - test-sdist:
+          requires:
+            - build-sdist
+  deploy:
+    jobs:
+      - build-linux: &deploy-build
+          <<: *build
+          filters:
+            tags:
+              only: /^[0-9]+(\.[0-9]+)*((\.dev|rc)([0-9]+)?)?$/
+            branches:
+              ignore: /.*/
+      - build-linux-aarch64: *deploy-build
+      - build-osx: *deploy-build
+      - build-sdist:
+          filters:
+            tags:
+              only: /^[0-9]+(\.[0-9]+)*((\.dev|rc)([0-9]+)?)?$/
+            branches:
+              ignore: /.*/
+      - build-windows: *deploy-build
+      - deploy-all:
+          filters:
+            tags:
+              only: /^[0-9]+(\.[0-9]+)*((\.dev|rc)([0-9]+)?)?$/
+            branches:
+              ignore: /.*/
+          requires:
+            - build-linux
+            - build-linux-aarch64
+            - build-osx
+            - build-sdist
+            - build-windows
